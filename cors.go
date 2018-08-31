@@ -13,7 +13,7 @@ type cors struct {
 	h                      http.Handler
 	allowedHeaders         []string
 	allowedMethods         []string
-	allowedOrigins         []string
+	allowedOrigins         func(r *http.Request) []string
 	allowedOriginValidator OriginValidator
 	exposedHeaders         []string
 	maxAge                 int
@@ -47,7 +47,7 @@ const (
 
 func (ch *cors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get(corsOriginHeader)
-	if !ch.isOriginAllowed(origin) {
+	if !ch.isOriginAllowed(origin, r) {
 		if r.Method != corsOptionMethod || ch.ignoreOptions {
 			ch.h.ServeHTTP(w, r)
 		}
@@ -109,15 +109,15 @@ func (ch *cors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(corsAllowCredentialsHeader, "true")
 	}
 
-	if len(ch.allowedOrigins) > 1 {
+	if len(ch.allowedOrigins(r)) > 1 {
 		w.Header().Set(corsVaryHeader, corsOriginHeader)
 	}
 
 	returnOrigin := origin
-	if ch.allowedOriginValidator == nil && len(ch.allowedOrigins) == 0 {
+	if ch.allowedOriginValidator == nil && len(ch.allowedOrigins(r)) == 0 {
 		returnOrigin = "*"
 	} else {
-		for _, o := range ch.allowedOrigins {
+		for _, o := range ch.allowedOrigins(r) {
 			// A configuration of * is different than explicitly setting an allowed
 			// origin. Returning arbitrary origin headers in an access control allow
 			// origin header is unsafe and is not required by any use case.
@@ -166,7 +166,7 @@ func parseCORSOptions(opts ...CORSOption) *cors {
 	ch := &cors{
 		allowedMethods: defaultCorsMethods,
 		allowedHeaders: defaultCorsHeaders,
-		allowedOrigins: []string{},
+		allowedOrigins: func(r *http.Request) []string { return []string{} },
 	}
 
 	for _, option := range opts {
@@ -228,16 +228,9 @@ func AllowedMethods(methods []string) CORSOption {
 // AllowedOrigins sets the allowed origins for CORS requests, as used in the
 // 'Allow-Access-Control-Origin' HTTP header.
 // Note: Passing in a []string{"*"} will allow any domain.
-func AllowedOrigins(origins []string) CORSOption {
+func AllowedOrigins(originFunc func(r *http.Request) []string) CORSOption {
 	return func(ch *cors) error {
-		for _, v := range origins {
-			if v == corsOriginMatchAll {
-				ch.allowedOrigins = []string{corsOriginMatchAll}
-				return nil
-			}
-		}
-
-		ch.allowedOrigins = origins
+		ch.allowedOrigins = originFunc
 		return nil
 	}
 }
@@ -305,7 +298,7 @@ func AllowCredentials() CORSOption {
 	}
 }
 
-func (ch *cors) isOriginAllowed(origin string) bool {
+func (ch *cors) isOriginAllowed(origin string, r *http.Request) bool {
 	if origin == "" {
 		return false
 	}
@@ -314,11 +307,11 @@ func (ch *cors) isOriginAllowed(origin string) bool {
 		return ch.allowedOriginValidator(origin)
 	}
 
-	if len(ch.allowedOrigins) == 0 {
+	if len(ch.allowedOrigins(r)) == 0 {
 		return true
 	}
 
-	for _, allowedOrigin := range ch.allowedOrigins {
+	for _, allowedOrigin := range ch.allowedOrigins(r) {
 		if allowedOrigin == origin || allowedOrigin == corsOriginMatchAll {
 			return true
 		}
