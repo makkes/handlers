@@ -13,7 +13,7 @@ type cors struct {
 	h                      http.Handler
 	allowedHeaders         []string
 	allowedMethods         []string
-	allowedOrigins         func(r *http.Request) []string
+	allowedOrigins         func(r *http.Request) ([]string, *http.Request)
 	allowedOriginValidator OriginValidator
 	exposedHeaders         []string
 	maxAge                 int
@@ -47,32 +47,33 @@ const (
 
 func (ch *cors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get(corsOriginHeader)
-	if !ch.isOriginAllowed(origin, r) {
-		if r.Method != corsOptionMethod || ch.ignoreOptions {
-			ch.h.ServeHTTP(w, r)
+	allowedOrigins, r2 := ch.allowedOrigins(r)
+	if !ch.isOriginAllowed(origin, allowedOrigins, r2) {
+		if r2.Method != corsOptionMethod || ch.ignoreOptions {
+			ch.h.ServeHTTP(w, r2)
 		}
 
 		return
 	}
 
-	if r.Method == corsOptionMethod {
+	if r2.Method == corsOptionMethod {
 		if ch.ignoreOptions {
-			ch.h.ServeHTTP(w, r)
+			ch.h.ServeHTTP(w, r2)
 			return
 		}
 
-		if _, ok := r.Header[corsRequestMethodHeader]; !ok {
+		if _, ok := r2.Header[corsRequestMethodHeader]; !ok {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
-		method := r.Header.Get(corsRequestMethodHeader)
+		method := r2.Header.Get(corsRequestMethodHeader)
 		if !ch.isMatch(method, ch.allowedMethods) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 
-		requestHeaders := strings.Split(r.Header.Get(corsRequestHeadersHeader), ",")
+		requestHeaders := strings.Split(r2.Header.Get(corsRequestHeadersHeader), ",")
 		allowedHeaders := []string{}
 		for _, v := range requestHeaders {
 			canonicalHeader := http.CanonicalHeaderKey(strings.TrimSpace(v))
@@ -109,15 +110,15 @@ func (ch *cors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(corsAllowCredentialsHeader, "true")
 	}
 
-	if len(ch.allowedOrigins(r)) > 1 {
+	if len(allowedOrigins) > 1 {
 		w.Header().Set(corsVaryHeader, corsOriginHeader)
 	}
 
 	returnOrigin := origin
-	if ch.allowedOriginValidator == nil && len(ch.allowedOrigins(r)) == 0 {
+	if ch.allowedOriginValidator == nil && len(allowedOrigins) == 0 {
 		returnOrigin = "*"
 	} else {
-		for _, o := range ch.allowedOrigins(r) {
+		for _, o := range allowedOrigins {
 			// A configuration of * is different than explicitly setting an allowed
 			// origin. Returning arbitrary origin headers in an access control allow
 			// origin header is unsafe and is not required by any use case.
@@ -129,10 +130,10 @@ func (ch *cors) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set(corsAllowOriginHeader, returnOrigin)
 
-	if r.Method == corsOptionMethod {
+	if r2.Method == corsOptionMethod {
 		return
 	}
-	ch.h.ServeHTTP(w, r)
+	ch.h.ServeHTTP(w, r2)
 }
 
 // CORS provides Cross-Origin Resource Sharing middleware.
@@ -166,7 +167,7 @@ func parseCORSOptions(opts ...CORSOption) *cors {
 	ch := &cors{
 		allowedMethods: defaultCorsMethods,
 		allowedHeaders: defaultCorsHeaders,
-		allowedOrigins: func(r *http.Request) []string { return []string{} },
+		allowedOrigins: func(r *http.Request) ([]string, *http.Request) { return []string{}, r },
 	}
 
 	for _, option := range opts {
@@ -228,7 +229,7 @@ func AllowedMethods(methods []string) CORSOption {
 // AllowedOrigins sets the allowed origins for CORS requests, as used in the
 // 'Allow-Access-Control-Origin' HTTP header.
 // Note: Passing in a []string{"*"} will allow any domain.
-func AllowedOrigins(originFunc func(r *http.Request) []string) CORSOption {
+func AllowedOrigins(originFunc func(r *http.Request) ([]string, *http.Request)) CORSOption {
 	return func(ch *cors) error {
 		ch.allowedOrigins = originFunc
 		return nil
@@ -298,7 +299,7 @@ func AllowCredentials() CORSOption {
 	}
 }
 
-func (ch *cors) isOriginAllowed(origin string, r *http.Request) bool {
+func (ch *cors) isOriginAllowed(origin string, allowedOrigins []string, r *http.Request) bool {
 	if origin == "" {
 		return false
 	}
@@ -307,11 +308,11 @@ func (ch *cors) isOriginAllowed(origin string, r *http.Request) bool {
 		return ch.allowedOriginValidator(origin)
 	}
 
-	if len(ch.allowedOrigins(r)) == 0 {
+	if len(allowedOrigins) == 0 {
 		return true
 	}
 
-	for _, allowedOrigin := range ch.allowedOrigins(r) {
+	for _, allowedOrigin := range allowedOrigins {
 		if allowedOrigin == origin || allowedOrigin == corsOriginMatchAll {
 			return true
 		}
